@@ -196,32 +196,32 @@ static struct AST term_to_ast(Z3_context context, term_t term) {
 
     switch (arity) {
     case 1:
-      if (strcmp(name, "-")) {
+      if (strcmp(name, "-") == 0) {
 	mk_unary(context, term, Z3_mk_unary_minus, &retval);
-      } else if (strcmp(name, "abs")) {
+      } else if (strcmp(name, "abs") == 0) {
 	mk_unary(context, term, abs_wrapper, &retval);
       } else {
 	set_error(term, "unknown unary operation", &retval);
       }
       break;
     case 2:
-      if (strcmp(name, "-")) {
+      if (strcmp(name, "-") == 0) {
 	mk_binop(context, term, sub_wrapper, &retval);
-      } else if (strcmp(name, "+")) {
+      } else if (strcmp(name, "+") == 0) {
 	mk_binop(context, term, add_wrapper, &retval);
-      } else if (strcmp(name, "*")) {
+      } else if (strcmp(name, "*") == 0) {
 	mk_binop(context, term, mul_wrapper, &retval);
-      } else if (strcmp(name, "div")) {
+      } else if (strcmp(name, "div") == 0) {
 	mk_binop(context, term, Z3_mk_div, &retval);
-      } else if (strcmp(name, "mod")) {
+      } else if (strcmp(name, "mod") == 0) {
 	mk_binop(context, term, Z3_mk_mod, &retval);
-      } else if (strcmp(name, "<=")) {
+      } else if (strcmp(name, "<=") == 0) {
 	mk_binop(context, term, Z3_mk_le, &retval);
-      } else if (strcmp(name, "<")) {
+      } else if (strcmp(name, "<") == 0) {
 	mk_binop(context, term, Z3_mk_lt, &retval);
-      } else if (strcmp(name, ">=")) {
+      } else if (strcmp(name, ">=") == 0) {
 	mk_binop(context, term, Z3_mk_ge, &retval);
-      } else if (strcmp(name, ">")) {
+      } else if (strcmp(name, ">") == 0) {
 	mk_binop(context, term, Z3_mk_gt, &retval);
       } else {
 	set_error(term, "unknown binary operation", &retval);
@@ -251,13 +251,11 @@ static foreign_t z3_sat(term_t query) {
   Z3_context context = Z3_mk_context(config);
   
   struct AST ast = term_to_ast(context, query);
-  printf("GOT HERE\n");
 
   if (ast.which == AST_TYPE) {
     term_t except;
     Z3_solver solver = Z3_mk_solver(context);
     int ensure;
-
     Z3_solver_assert(context, solver, ast.value.ast);
 
     switch (Z3_solver_check(context, solver)) {
