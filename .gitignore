@@ -2,6 +2,5 @@
 *~
 \#*\#
 
-# object files
-*.o
-*.so
+# build directory
+build
