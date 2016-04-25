@@ -2,6 +2,7 @@
 #include <z3.h>
 #include <string.h>
 #include <assert.h>
+#include <stdio.h>
 
 enum ASTType {
   AST_TYPE,
@@ -250,6 +251,8 @@ static foreign_t z3_sat(term_t query) {
   Z3_context context = Z3_mk_context(config);
   
   struct AST ast = term_to_ast(context, query);
+  printf("GOT HERE\n");
+
   if (ast.which == AST_TYPE) {
     term_t except;
     Z3_solver solver = Z3_mk_solver(context);
