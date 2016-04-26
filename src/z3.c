@@ -41,15 +41,34 @@ struct List {
 };
 
 static struct List* mk_empty_list(void);
-static void prepend(struct VarMapEntry what, struct List* list);
+static void prepend(struct VarMapEntry what,
+		    struct List* list);
 static void free_list(struct List* list);
 
 static void set_ast(Z3_ast ast, struct AST* retval);
-static void set_error(term_t term_with_error, char* message, struct AST* ast);
-static Z3_ast add_wrapper(Z3_context context, Z3_ast left, Z3_ast right);
-static Z3_ast sub_wrapper(Z3_context context, Z3_ast left, Z3_ast right);
-static Z3_ast mul_wrapper(Z3_context context, Z3_ast left, Z3_ast right);
-static Z3_ast abs_wrapper(Z3_context context, Z3_ast around);
+static void set_error(term_t term_with_error,
+		      char* message,
+		      struct AST* ast);
+static Z3_ast and_wrapper(Z3_context context,
+			  Z3_ast left,
+			  Z3_ast right);
+static Z3_ast or_wrapper(Z3_context context,
+			 Z3_ast left,
+			 Z3_ast right);
+static Z3_ast distinct_wrapper(Z3_context context,
+			       Z3_ast left,
+			       Z3_ast right);
+static Z3_ast add_wrapper(Z3_context context,
+			  Z3_ast left,
+			  Z3_ast right);
+static Z3_ast sub_wrapper(Z3_context context,
+			  Z3_ast left,
+			  Z3_ast right);
+static Z3_ast mul_wrapper(Z3_context context,
+			  Z3_ast left,
+			  Z3_ast right);
+static Z3_ast abs_wrapper(Z3_context context,
+			  Z3_ast around);
 static void mk_unary(Z3_context context,
 		     term_t holds_param,
 		     Z3_ast (*f)(Z3_context, Z3_ast),
@@ -107,28 +126,62 @@ static void set_error(term_t term_with_error, char* message, struct AST* retval)
   retval->which = EXCEPTION_TYPE;
 }
 
-static Z3_ast add_wrapper(Z3_context context, Z3_ast left, Z3_ast right) {
+static Z3_ast and_wrapper(Z3_context context,
+			  Z3_ast left,
+			  Z3_ast right) {
+  Z3_ast args[2];
+  args[0] = left;
+  args[1] = right;
+  return Z3_mk_and(context, 2, args);
+}
+
+static Z3_ast or_wrapper(Z3_context context,
+			 Z3_ast left,
+			 Z3_ast right) {
+  Z3_ast args[2];
+  args[0] = left;
+  args[1] = right;
+  return Z3_mk_or(context, 2, args);
+}
+
+static Z3_ast distinct_wrapper(Z3_context context,
+			       Z3_ast left,
+			       Z3_ast right) {
+  Z3_ast args[2];
+  args[0] = left;
+  args[1] = right;
+  return Z3_mk_distinct(context, 2, args);
+}
+
+static Z3_ast add_wrapper(Z3_context context,
+			  Z3_ast left,
+			  Z3_ast right) {
   Z3_ast args[2];
   args[0] = left;
   args[1] = right;
   return Z3_mk_add(context, 2, args);
 }
 
-static Z3_ast sub_wrapper(Z3_context context, Z3_ast left, Z3_ast right) {
+static Z3_ast sub_wrapper(Z3_context context,
+			  Z3_ast left,
+			  Z3_ast right) {
   Z3_ast args[2];
   args[0] = left;
   args[1] = right;
   return Z3_mk_sub(context, 2, args);
 }
 
-static Z3_ast mul_wrapper(Z3_context context, Z3_ast left, Z3_ast right) {
+static Z3_ast mul_wrapper(Z3_context context,
+			  Z3_ast left,
+			  Z3_ast right) {
   Z3_ast args[2];
   args[0] = left;
   args[1] = right;
   return Z3_mk_mul(context, 2, args);
 }
 
-static Z3_ast abs_wrapper(Z3_context context, Z3_ast around) {
+static Z3_ast abs_wrapper(Z3_context context,
+			  Z3_ast around) {
   // abs(x) = if (x < 0) -x else x
   return Z3_mk_ite(context,
 		   Z3_mk_lt(context,
@@ -237,13 +290,24 @@ static struct AST term_to_ast(Z3_context context,  // where to make terms
   const char* name;
   int ensure;
   int error_occurred = 0;
-  char* printing;
   Z3_ast (*unary_op)(Z3_context, Z3_ast);
   Z3_ast (*binary_op)(Z3_context, Z3_ast, Z3_ast);
 
   switch (PL_term_type(term)) {
   case PL_VARIABLE:
     set_ast(add_variable(context, term, list), &retval);
+    break;
+
+  case PL_ATOM:
+    ensure = PL_get_atom_chars(term, &temp_string);
+    assert(ensure);
+    if (strcmp(temp_string, "true") == 0) {
+      set_ast(Z3_mk_true(context), &retval);
+    } else if (strcmp(temp_string, "false") == 0) {
+      set_ast(Z3_mk_false(context), &retval);
+    } else {
+      set_error(term, "unknown boolean constant", &retval);
+    }
     break;
 
   case PL_INTEGER:
@@ -263,6 +327,8 @@ static struct AST term_to_ast(Z3_context context,  // where to make terms
 	unary_op = &Z3_mk_unary_minus;
       } else if (strcmp(name, "abs") == 0) {
 	unary_op = &abs_wrapper;
+      } else if (strcmp(name, "not") == 0) {
+	unary_op = &Z3_mk_not;
       } else {
 	set_error(term, "unknown unary operation", &retval);
 	error_occurred = 1;
@@ -291,6 +357,20 @@ static struct AST term_to_ast(Z3_context context,  // where to make terms
 	binary_op = &Z3_mk_ge;
       } else if (strcmp(name, ">") == 0) {
 	binary_op = &Z3_mk_gt;
+      } else if (strcmp(name, "=") == 0) {
+	binary_op = &Z3_mk_eq;
+      } else if (strcmp(name, "distinct") == 0) {
+	binary_op = &distinct_wrapper;
+      } else if (strcmp(name, "iff") == 0) {
+	binary_op = &Z3_mk_iff;
+      } else if (strcmp(name, "implies") == 0) {
+	binary_op = &Z3_mk_implies;
+      } else if (strcmp(name, "xor") == 0) {
+	binary_op = &Z3_mk_xor;
+      } else if (strcmp(name, "and") == 0) {
+	binary_op = &and_wrapper;
+      } else if (strcmp(name, "or") == 0) {
+	binary_op = &or_wrapper;
       } else {
 	set_error(term, "unknown binary operation", &retval);
 	error_occurred = 1;
