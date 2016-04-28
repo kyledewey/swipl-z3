@@ -17,28 +17,30 @@ struct AST {
   enum ASTType which;
 };
 
-struct BinopResult {
+struct MultiResult {
   union {
-    Z3_ast pair[2];
+    Z3_ast* results;
     term_t exception;
   } value;
   enum ASTType which;
+  unsigned int num_results_requested;
 };
 
-/* enum SolverTypeId { */
-/*   BOOLEAN_TYPE, */
-/*   BITVECTOR_TYPE */
-/* }; */
+enum SolverTypeId {
+  BOOLEAN_TYPE,
+  INT_TYPE,
+  UNINSTANTIATED_TYPE
+};
 
-/* struct SolverType { */
-/*   enum SolverTypeId id; */
-/*   unsigned int bitvec_length; // unspecified for booleans */
-/* }; */
+struct SolverType {
+  enum SolverTypeId id;
+};
 
 struct VarMapEntry {
+  char* name;
   term_t prolog_variable;
   Z3_ast z3_variable;
-  /* struct SolverType solver_type; */
+  struct SolverType solver_type;
 };
 
 struct Cons {
@@ -80,23 +82,34 @@ static Z3_ast mul_wrapper(Z3_context context,
 			  Z3_ast right);
 static Z3_ast abs_wrapper(Z3_context context,
 			  Z3_ast around);
+static struct MultiResult multi_result(Z3_context context,
+				       struct List* list,
+				       term_t term,
+				       struct SolverType** expected_types,
+				       unsigned int num_results);
+static void free_multi_result(struct MultiResult* result);
 static struct AST mk_unary(Z3_context context,
 			   struct List* list,
 			   term_t holds_param,
-			   Z3_ast (*f)(Z3_context, Z3_ast));
-static struct AST mk_binop(Z3_context context,
-			   struct List* list,
-			   term_t holds_params,
-			   Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast));
-static struct AST binop_result_to_ast(Z3_context context,
-				      struct BinopResult result,
-				      Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast));
-static struct BinopResult binop_result(Z3_context context,
-				       struct List* list,
-				       term_t term);
+			   Z3_ast (*f)(Z3_context, Z3_ast),
+			   struct SolverType* expected_nested_type);
+static struct AST mk_binary(Z3_context context,
+			    struct List* list,
+			    term_t holds_params,
+			    Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast),
+			    struct SolverType* expected_left_type,
+			    struct SolverType* expected_right_type);
+static struct AST mk_ternary(Z3_context context,
+			     struct List* list,
+			     term_t holds_params,
+			     Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast, Z3_ast),
+			     struct SolverType* first_type,
+			     struct SolverType* second_type,
+			     struct SolverType* third_type);
 static struct AST term_to_ast(Z3_context context,
 			      struct List* list,
-			      term_t term);
+			      term_t term,
+			      struct SolverType* expected_type);
 static foreign_t z3_sat(term_t query);
 
 // For the moment, we only care about the theory of integers
@@ -202,205 +215,555 @@ static Z3_ast abs_wrapper(Z3_context context,
 static struct AST mk_unary(Z3_context context,
 			   struct List* list,
 			   term_t holds_param,
-			   Z3_ast (*f)(Z3_context, Z3_ast)) {
-  struct AST retval;
-  int ensure;
-  term_t nested_term = PL_new_term_ref();
-  ensure = PL_get_arg(1, holds_param, nested_term);
-  assert(ensure);
-  struct AST nested = term_to_ast(context, list, nested_term);
-  if (nested.which == AST_TYPE) {
-    set_ast((*f)(context, nested.value.ast), &retval);
-  } else {
-    retval.value.exception = nested.value.exception;
-    retval.which = EXCEPTION_TYPE;
-  }
-  return retval;
-}
-
-static struct AST mk_binop(Z3_context context,
-			   struct List* list,
-			   term_t holds_params,
-			   Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast)) {
-  return binop_result_to_ast(context,
-			     binop_result(context, list, holds_params),
-			     f);
-}
-
-static struct AST binop_result_to_ast(Z3_context context,
-				      struct BinopResult result,
-				      Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast)) {
+			   Z3_ast (*f)(Z3_context, Z3_ast),
+			   struct SolverType* expected_nested_type) {
+  struct SolverType* expected[1];
+  expected[0] = expected_nested_type;
+  struct MultiResult result = multi_result(context, list,
+					   holds_param,
+					   expected,
+					   1);
   struct AST retval;
 
   if (result.which == AST_TYPE) {
-    set_ast((*f)(context, result.value.pair[0], result.value.pair[1]), &retval);
+    set_ast((*f)(context,
+		 result.value.results[0]),
+	    &retval);
   } else {
     retval.which = EXCEPTION_TYPE;
     retval.value.exception = result.value.exception;
   }
+
+  free_multi_result(&result);
+
   return retval;
+} // mk_unary
+
+static struct AST mk_binary(Z3_context context,
+			    struct List* list,
+			    term_t holds_params,
+			    Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast),
+			    struct SolverType* expected_left_type,
+			    struct SolverType* expected_right_type) {
+  struct SolverType* expected[2];
+  expected[0] = expected_left_type;
+  expected[1] = expected_right_type;
+  struct MultiResult result = multi_result(context, list,
+					   holds_params,
+					   expected,
+					   2);
+  struct AST retval;
+
+  if (result.which == AST_TYPE) {
+    set_ast((*f)(context,
+		 result.value.results[0],
+		 result.value.results[1]),
+	    &retval);
+  } else {
+    retval.which = EXCEPTION_TYPE;
+    retval.value.exception = result.value.exception;
+  }
+
+  free_multi_result(&result);
+
+  return retval;
+} // mk_binary
+
+static struct AST mk_ternary(Z3_context context,
+			     struct List* list,
+			     term_t holds_params,
+			     Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast, Z3_ast),
+			     struct SolverType* first_type,
+			     struct SolverType* second_type,
+			     struct SolverType* third_type) {
+  struct SolverType* expected[3];
+  expected[0] = first_type;
+  expected[1] = second_type;
+  expected[2] = third_type;
+  struct MultiResult result = multi_result(context, list,
+					   holds_params,
+					   expected,
+					   3);
+  struct AST retval;
+
+  if (result.which == AST_TYPE) {
+    set_ast((*f)(context,
+		 result.value.results[0],
+		 result.value.results[1],
+		 result.value.results[2]),
+	    &retval);
+  } else {
+    retval.which = EXCEPTION_TYPE;
+    retval.value.exception = result.value.exception;
+  }
+
+  free_multi_result(&result);
+
+  return retval;
+} // mk_ternary
+
+static void free_multi_result(struct MultiResult* result) {
+  if (result->which == AST_TYPE) {
+    free(result->value.results);
+  }
 }
 
-static struct BinopResult binop_result(Z3_context context,
+static struct MultiResult multi_result(Z3_context context,
 				       struct List* list,
-				       term_t term) {
-  struct BinopResult retval;
-  int ensure;
-  term_t left_term = PL_new_term_ref();
-  ensure = PL_get_arg(1, term, left_term);
-  assert(ensure);
-  struct AST left = term_to_ast(context, list, left_term);
-  if (left.which == AST_TYPE) {
-    term_t right_term = PL_new_term_ref();
-    ensure = PL_get_arg(2, term, right_term);
+				       term_t term,
+				       struct SolverType** expected_types,
+				       unsigned int num_results) {
+  assert(num_results > 0);
+
+  struct MultiResult retval;
+  retval.which = AST_TYPE;
+  retval.num_results_requested = num_results;
+  retval.value.results = malloc(sizeof(Z3_ast) * num_results);
+  
+  int x;
+  for (x = 0; x < num_results; x++) {
+    term_t cur_term = PL_new_term_ref();
+    int ensure = PL_get_arg(x + 1, term, cur_term);
     assert(ensure);
-    struct AST right = term_to_ast(context, list, right_term);
-    if (right.which == AST_TYPE) {
-      retval.value.pair[0] = left.value.ast;
-      retval.value.pair[1] = right.value.ast;
-      retval.which = AST_TYPE;
-    } else {
-      retval.value.exception = right.value.exception;
+    struct AST cur_ast = term_to_ast(context, list, cur_term,
+				     expected_types[x]);
+
+    // bail out on error
+    if (cur_ast.which == EXCEPTION_TYPE) {
+      free(retval.value.results);
       retval.which = EXCEPTION_TYPE;
+      retval.value.exception = cur_ast.value.exception;
+      return retval;
     }
-  } else {
-    retval.value.exception = left.value.exception;
-    retval.which = EXCEPTION_TYPE;
+
+    assert(cur_ast.which == AST_TYPE);
+    retval.value.results[x] = cur_ast.value.ast;
+  }
+
+  return retval;
+} // multi_result
+
+static struct VarMapEntry* get_variable(struct List* list,
+					char* name) {
+  struct VarMapEntry* retval = NULL;
+  struct Cons* cur = list->contents;
+  while (cur != NULL) {
+    // TODO: could we just compare pointers?
+    if (strcmp(name, cur->head.name) == 0) {
+      retval = &(cur->head);
+      break;
+    }
+    cur = cur->tail;
   }
 
   return retval;
 }
 
-// returns the Z3 representation of the variable
-static Z3_ast add_variable(Z3_context context,
-			   term_t term,
-			   struct List* list) {
-  assert(PL_is_variable(term));
-  char* name;
-  int ensure = PL_get_chars(term, &name, CVT_VARIABLE);
-
-  struct VarMapEntry entry;
-  entry.prolog_variable = term;
-  Z3_ast ast = Z3_mk_const(context,
-			   Z3_mk_string_symbol(context, name),
-			   Z3_mk_int_sort(context));
-  entry.z3_variable = ast;
-  prepend(entry, list);
-  return ast;
+// returns non-zero on success
+static int unify_types(struct SolverType* type1,
+		       struct SolverType* type2) {
+  if (type1->id == UNINSTANTIATED_TYPE) {
+    type1->id = type2->id;
+    return 1;
+  } else if (type2->id == UNINSTANTIATED_TYPE) {
+    type2->id = type1->id;
+    return 1;
+  } else if (type1->id == type2->id) {
+    return 1;
+  } else {
+    return 0;
+  }
 }
 
-static struct AST term_to_ast(Z3_context context,               // where to make terms
-			      struct List* list,                // vars to terms
-			      term_t term) {                      // term to convert
-			      //struct SolverType* solver_type) { // term type (output)
+static void set_smt_type_error(term_t prolog_term,
+			       struct AST* result) {
+  set_error(prolog_term, "SMT type error", result);
+}
+
+// returns non-zero on success
+static int unify_types_set_ast(struct SolverType* type1,
+			       struct SolverType* type2,
+			       term_t prolog_term,
+			       Z3_ast z3_ast,
+			       struct AST* result_ast) {
+  int retval = unify_types(type1, type2);
+  if (retval) {
+    set_ast(z3_ast, result_ast);
+  } else {
+    set_smt_type_error(prolog_term, result_ast);
+  }
+  return retval;
+}
+
+// returns zero if there was no applicable sort
+static int get_sort_for_type(Z3_context context,
+			     struct SolverType* expected_type,
+			     Z3_sort* sort) {
+  switch (expected_type->id) {
+  case BOOLEAN_TYPE:
+    *sort = Z3_mk_bool_sort(context);
+    return 1;
+  case INT_TYPE:
+    *sort = Z3_mk_int_sort(context);
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+static struct AST handle_ternary_op(Z3_context context,
+				    struct List* list,
+				    struct SolverType* expected_type,
+				    const char* name,
+				    term_t prolog_term) {
   struct AST retval;
+  struct SolverType my_type;
+  my_type.id = UNINSTANTIATED_TYPE;
+
+  // at the moment, we only handle ite, so this is specialized
+  // for that
+  if (strcmp(name, "ite") == 0) {
+    struct SolverType guard_type;
+    guard_type.id = BOOLEAN_TYPE;
+    // my type = left child type = right child type
+    retval = mk_ternary(context, list, prolog_term,
+			&Z3_mk_ite,
+			&guard_type,
+			expected_type,
+			expected_type);
+  } else {
+    set_error(prolog_term, "unknown ternary operation", &retval);
+  }
+
+  return retval;
+}
+
+static struct AST handle_binary_op(Z3_context context,
+				   struct List* list,
+				   struct SolverType* expected_type,
+				   const char* name,
+				   term_t prolog_term) {
+  struct AST retval;
+  Z3_ast (*mk_op)(Z3_context, Z3_ast, Z3_ast);
+  struct SolverType my_type;
+  int error_occurred = 0;
+
+  // we intentionally split this up because `distinct`
+  // requires both parameters to be of the same type,
+  // but it's polymorphic.  A trick is to leave the type
+  // uninstantiated here, but use the same SolverType
+  // for both sides.
+  struct SolverType left_type_struct;
+  struct SolverType right_type_struct;
+  struct SolverType* left_type = &left_type_struct;
+  struct SolverType* right_type = &right_type_struct;
+
+  if (strcmp(name, "-") == 0) {
+    my_type.id = INT_TYPE;
+    left_type->id = INT_TYPE;
+    right_type->id = INT_TYPE;
+    mk_op = &sub_wrapper;
+  } else if (strcmp(name, "+") == 0) {
+    my_type.id = INT_TYPE;
+    left_type->id = INT_TYPE;
+    right_type->id = INT_TYPE;
+    mk_op = &add_wrapper;
+  } else if (strcmp(name, "*") == 0) {
+    my_type.id = INT_TYPE;
+    left_type->id = INT_TYPE;
+    right_type->id = INT_TYPE;
+    mk_op = &mul_wrapper;
+  } else if (strcmp(name, "div") == 0) {
+    my_type.id = INT_TYPE;
+    left_type->id = INT_TYPE;
+    right_type->id = INT_TYPE;
+    mk_op = &Z3_mk_div;
+  } else  if (strcmp(name, "mod") == 0) {
+    my_type.id = INT_TYPE;
+    left_type->id = INT_TYPE;
+    right_type->id = INT_TYPE;
+    mk_op = &Z3_mk_mod;
+  } else if (strcmp(name, "<=") == 0) {
+    my_type.id = BOOLEAN_TYPE;
+    left_type->id = INT_TYPE;
+    right_type->id = INT_TYPE;
+    mk_op = &Z3_mk_le;
+  } else if (strcmp(name, "<") == 0) {
+    my_type.id = BOOLEAN_TYPE;
+    left_type->id = INT_TYPE;
+    right_type->id = INT_TYPE;
+    mk_op = &Z3_mk_lt;
+  } else if (strcmp(name, ">=") == 0) {
+    my_type.id = BOOLEAN_TYPE;
+    left_type->id = INT_TYPE;
+    right_type->id = INT_TYPE;
+    mk_op = &Z3_mk_ge;
+  } else if (strcmp(name, ">") == 0) {
+    my_type.id = BOOLEAN_TYPE;
+    left_type->id = INT_TYPE;
+    right_type->id = INT_TYPE;
+    mk_op = &Z3_mk_gt;
+  } else if (strcmp(name, "=") == 0) {
+    // polymorphic; both point to left
+    my_type.id = BOOLEAN_TYPE;
+    right_type = left_type;
+    left_type->id = UNINSTANTIATED_TYPE;
+    mk_op = &Z3_mk_eq;
+  } else if (strcmp(name, "distinct") == 0) {
+    // polymorphic; both point to left
+    my_type.id = BOOLEAN_TYPE;
+    right_type = left_type;
+    left_type->id = UNINSTANTIATED_TYPE;
+    mk_op = &distinct_wrapper;
+  } else if (strcmp(name, "iff") == 0) {
+    my_type.id = BOOLEAN_TYPE;
+    left_type->id = BOOLEAN_TYPE;
+    right_type->id = BOOLEAN_TYPE;
+    mk_op = &Z3_mk_iff;
+  } else if (strcmp(name, "implies") == 0) {
+    my_type.id = BOOLEAN_TYPE;
+    left_type->id = BOOLEAN_TYPE;
+    right_type->id = BOOLEAN_TYPE;
+    mk_op = &Z3_mk_implies;
+  } else if (strcmp(name, "xor") == 0) {
+    my_type.id = BOOLEAN_TYPE;
+    left_type->id = BOOLEAN_TYPE;
+    right_type->id = BOOLEAN_TYPE;
+    mk_op = &Z3_mk_xor;
+  } else if (strcmp(name, "and") == 0) {
+    my_type.id = BOOLEAN_TYPE;
+    left_type->id = BOOLEAN_TYPE;
+    right_type->id = BOOLEAN_TYPE;
+    mk_op = &and_wrapper;
+  } else if (strcmp(name, "or") == 0) {
+    my_type.id = BOOLEAN_TYPE;
+    left_type->id = BOOLEAN_TYPE;
+    right_type->id = BOOLEAN_TYPE;
+    mk_op = &or_wrapper;
+  } else {
+    set_error(prolog_term, "unknown binary operation", &retval);
+    error_occurred = 1;
+  }
+
+  if (!error_occurred) {
+    if (!unify_types(expected_type, &my_type)) {
+      set_smt_type_error(prolog_term, &retval);
+    } else {
+      retval = mk_binary(context, list, prolog_term, mk_op,
+			 left_type, right_type);
+    }
+  }
+
+  return retval;
+} // handle_binary_op
+
+static struct AST handle_unary_op(Z3_context context,
+				  struct List* list,
+				  struct SolverType* expected_type,
+				  const char* name,
+				  term_t prolog_term) {
+  struct AST retval;
+  Z3_ast (*mk_op)(Z3_context, Z3_ast);
+  struct SolverType my_type;
+  struct SolverType nested_type;
+  int error_occurred = 0;
+
+  if (strcmp(name, "-") == 0) {
+    my_type.id = INT_TYPE;
+    nested_type.id = INT_TYPE;
+    mk_op = &Z3_mk_unary_minus;
+  } else if (strcmp(name, "abs") == 0) {
+    my_type.id = INT_TYPE;
+    nested_type.id = INT_TYPE;
+    mk_op = &abs_wrapper;
+  } else if (strcmp(name, "not") == 0) {
+    my_type.id = BOOLEAN_TYPE;
+    nested_type.id = BOOLEAN_TYPE;
+    mk_op = &abs_wrapper;
+  } else {
+    set_error(prolog_term, "unknown unary operation", &retval);
+    error_occurred = 1;
+  }
+
+  if (!error_occurred) {
+    if (!unify_types(expected_type, &my_type)) {
+      set_smt_type_error(prolog_term, &retval);
+    } else {
+      retval = mk_unary(context, list, prolog_term, mk_op,
+			&nested_type);
+    }
+  }
+
+  return retval;
+} // handle_unary_op
+
+static struct AST handle_compound_term(Z3_context context,
+				       struct List* list,
+				       struct SolverType* expected_type,
+				       term_t prolog_term) {
+  assert(PL_is_compound(prolog_term));
+  atom_t atom_name;
+  int arity;
+  int ensure = PL_get_compound_name_arity(prolog_term,
+					  &atom_name,
+					  &arity);
+  assert(ensure);
+
+  struct AST retval;
+  const char* name;
+  size_t len;
+
+  name = PL_atom_nchars(atom_name, &len);
+
+  switch (arity) {
+  case 1:
+    retval = handle_unary_op(context, list, expected_type,
+			     name, prolog_term);
+    break;
+  case 2:
+    retval = handle_binary_op(context, list, expected_type,
+			      name, prolog_term);
+    break;
+  case 3:
+    retval = handle_ternary_op(context, list, expected_type,
+			       name, prolog_term);
+    break;
+  default:
+    set_error(prolog_term, "unknown SMT operation", &retval);
+    break;
+  } // switch (arity)
+
+  return retval;
+} // handle_compound_term
+
+static struct AST handle_integer(Z3_context context,
+				 struct SolverType* expected_type,
+				 term_t prolog_integer) {
+  assert(PL_is_integer(prolog_integer));
+
+  struct AST retval;
+  struct SolverType inferred_type;
   int temp_int;
+  int ensure = PL_get_integer(prolog_integer, &temp_int);
+  assert(ensure);
+  inferred_type.id = INT_TYPE;
+  unify_types_set_ast(expected_type,
+		      &inferred_type,
+		      prolog_integer,
+		      Z3_mk_int(context,
+				temp_int,
+				Z3_mk_int_sort(context)),
+		      &retval);
+  return retval;
+}
+
+static struct AST handle_atom(Z3_context context,
+			      struct SolverType* expected_type,
+			      term_t prolog_atom) {
+  assert(PL_is_atom(prolog_atom));
+
+  struct AST retval;
+  Z3_ast z3_ast;
+  struct SolverType inferred_type;
   char* temp_string;
+  int ensure = PL_get_atom_chars(prolog_atom, &temp_string);
+  assert(ensure);
+  if (strcmp(temp_string, "true") == 0) {
+    inferred_type.id = BOOLEAN_TYPE;
+    unify_types_set_ast(expected_type, &inferred_type,
+			prolog_atom, Z3_mk_true(context),
+			&retval);
+  } else if (strcmp(temp_string, "false") == 0) {
+    inferred_type.id = BOOLEAN_TYPE;
+    unify_types_set_ast(expected_type, &inferred_type,
+			prolog_atom, Z3_mk_false(context),
+			&retval);
+  } else {
+    set_error(prolog_atom, "unknown constant", &retval);
+  }
+
+  return retval;
+}
+    
+// returns the Z3 representation of the variable, or a type error
+static struct AST handle_variable(Z3_context context,
+				  struct List* list,
+				  struct SolverType* expected_type,
+				  term_t prolog_variable) {
+  assert(PL_is_variable(prolog_variable));
+  char* name;
+  int ensure = PL_get_chars(prolog_variable, &name, CVT_VARIABLE);
+  assert(ensure);
+
+  // See if the variable already exists.  If so, try to use that.
+  struct AST retval;
+  struct VarMapEntry* existing_variable = get_variable(list, name);
+
+  if (existing_variable != NULL) {
+    // We already have variable.  Make sure the types work
+    unify_types_set_ast(expected_type,
+			&(existing_variable->solver_type),
+			prolog_variable,
+			existing_variable->z3_variable,
+			&retval);
+  } else {
+    // introduce a new variable
+    Z3_sort sort;
+    if (get_sort_for_type(context, expected_type, &sort)) {
+      struct VarMapEntry entry;
+      Z3_ast ast = Z3_mk_const(context,
+			       Z3_mk_string_symbol(context, name),
+			       Z3_mk_int_sort(context));
+      entry.name = name;
+      entry.prolog_variable = prolog_variable;
+      entry.z3_variable = ast;
+      entry.solver_type = *expected_type;
+      prepend(entry, list);
+      set_ast(ast, &retval);
+    } else {
+      set_error(prolog_variable, "Unknown SMT variable type", &retval);
+    }
+  }
+
+  return retval;
+}
+
+static struct AST term_to_ast(Z3_context context,                 // where to make terms
+			      struct List* list,                  // vars to terms
+			      term_t term,                        // term to convert
+			      struct SolverType* expected_type) { // term type
+  struct AST retval;
   atom_t atom_name;
   int arity;
   size_t len;
   const char* name;
   int ensure;
   int error_occurred = 0;
+  int type_error_occurred = 0;
   Z3_ast (*unary_op)(Z3_context, Z3_ast);
   Z3_ast (*binary_op)(Z3_context, Z3_ast, Z3_ast);
+  struct SolverType inferred_type;
+  inferred_type.id = UNINSTANTIATED_TYPE;
 
   switch (PL_term_type(term)) {
   case PL_VARIABLE:
-    set_ast(add_variable(context, term, list), &retval);
+    retval = handle_variable(context, list, expected_type, term);
     break;
 
   case PL_ATOM:
-    ensure = PL_get_atom_chars(term, &temp_string);
-    assert(ensure);
-    if (strcmp(temp_string, "true") == 0) {
-      set_ast(Z3_mk_true(context), &retval);
-    } else if (strcmp(temp_string, "false") == 0) {
-      set_ast(Z3_mk_false(context), &retval);
-    } else {
-      set_error(term, "unknown boolean constant", &retval);
-    }
+    retval = handle_atom(context, expected_type, term);
     break;
 
   case PL_INTEGER:
-    ensure = PL_get_integer(term, &temp_int);
-    assert(ensure);
-    set_ast(Z3_mk_int(context, temp_int, Z3_mk_int_sort(context)), &retval);
+    retval = handle_integer(context, expected_type, term);
     break;
 
   case PL_TERM:
-    ensure = PL_get_compound_name_arity(term, &atom_name, &arity);
-    assert(ensure);
-    name = PL_atom_nchars(atom_name, &len);
-
-    switch (arity) {
-    case 1:
-      if (strcmp(name, "-") == 0) {
-	unary_op = &Z3_mk_unary_minus;
-      } else if (strcmp(name, "abs") == 0) {
-	unary_op = &abs_wrapper;
-      } else if (strcmp(name, "not") == 0) {
-	unary_op = &Z3_mk_not;
-      } else {
-	set_error(term, "unknown unary operation", &retval);
-	error_occurred = 1;
-      }
-
-      if (!error_occurred) {
-	retval = mk_unary(context, list, term, unary_op);
-      }
-      break;
-    case 2:
-      if (strcmp(name, "-") == 0) {
-	binary_op = &sub_wrapper;
-      } else if (strcmp(name, "+") == 0) {
-	binary_op = &add_wrapper;
-      } else if (strcmp(name, "*") == 0) {
-	binary_op = &mul_wrapper;
-      } else if (strcmp(name, "div") == 0) {
-	binary_op = &Z3_mk_div;
-      } else if (strcmp(name, "mod") == 0) {
-	binary_op = &Z3_mk_mod;
-      } else if (strcmp(name, "<=") == 0) {
-	binary_op = &Z3_mk_le;
-      } else if (strcmp(name, "<") == 0) {
-	binary_op = &Z3_mk_lt;
-      } else if (strcmp(name, ">=") == 0) {
-	binary_op = &Z3_mk_ge;
-      } else if (strcmp(name, ">") == 0) {
-	binary_op = &Z3_mk_gt;
-      } else if (strcmp(name, "=") == 0) {
-	binary_op = &Z3_mk_eq;
-      } else if (strcmp(name, "distinct") == 0) {
-	binary_op = &distinct_wrapper;
-      } else if (strcmp(name, "iff") == 0) {
-	binary_op = &Z3_mk_iff;
-      } else if (strcmp(name, "implies") == 0) {
-	binary_op = &Z3_mk_implies;
-      } else if (strcmp(name, "xor") == 0) {
-	binary_op = &Z3_mk_xor;
-      } else if (strcmp(name, "and") == 0) {
-	binary_op = &and_wrapper;
-      } else if (strcmp(name, "or") == 0) {
-	binary_op = &or_wrapper;
-      } else {
-	set_error(term, "unknown binary operation", &retval);
-	error_occurred = 1;
-      }
-
-      if (!error_occurred) {
-	retval = mk_binop(context, list, term, binary_op);
-      }
-      break;
-
-    default:
-      set_error(term, "unknown operation", &retval);
-      break;
-    } // switch (arity)
+    retval = handle_compound_term(context, list, expected_type,
+				  term);
     break;
-
   default:
-    set_error(term, "invalid value", &retval);
+    set_error(term, "bad Prolog value", &retval);
     break;
   } // switch (PL_term_type)
 
@@ -446,7 +809,9 @@ static foreign_t z3_sat(term_t query) {
   Z3_config config = Z3_mk_config();
   Z3_context context = Z3_mk_context(config);
   struct List* list = mk_empty_list();
-  struct AST ast = term_to_ast(context, list, query);
+  struct SolverType expected_type;
+  expected_type.id = BOOLEAN_TYPE;
+  struct AST ast = term_to_ast(context, list, query, &expected_type);
 
   if (ast.which == AST_TYPE) {
     term_t except;
