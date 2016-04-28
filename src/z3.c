@@ -25,9 +25,20 @@ struct BinopResult {
   enum ASTType which;
 };
 
+/* enum SolverTypeId { */
+/*   BOOLEAN_TYPE, */
+/*   BITVECTOR_TYPE */
+/* }; */
+
+/* struct SolverType { */
+/*   enum SolverTypeId id; */
+/*   unsigned int bitvec_length; // unspecified for booleans */
+/* }; */
+
 struct VarMapEntry {
   term_t prolog_variable;
   Z3_ast z3_variable;
+  /* struct SolverType solver_type; */
 };
 
 struct Cons {
@@ -69,26 +80,23 @@ static Z3_ast mul_wrapper(Z3_context context,
 			  Z3_ast right);
 static Z3_ast abs_wrapper(Z3_context context,
 			  Z3_ast around);
-static void mk_unary(Z3_context context,
-		     term_t holds_param,
-		     Z3_ast (*f)(Z3_context, Z3_ast),
-		     struct AST* retval,
-		     struct List* list);
-static void mk_binop(Z3_context context,
-		     term_t holds_params,
-		     Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast),
-		     struct AST* retval,
-		     struct List* list);
-static void binop_result_to_ast(Z3_context context,
-				struct BinopResult result,
-				Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast),
-				struct AST* retval);
+static struct AST mk_unary(Z3_context context,
+			   struct List* list,
+			   term_t holds_param,
+			   Z3_ast (*f)(Z3_context, Z3_ast));
+static struct AST mk_binop(Z3_context context,
+			   struct List* list,
+			   term_t holds_params,
+			   Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast));
+static struct AST binop_result_to_ast(Z3_context context,
+				      struct BinopResult result,
+				      Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast));
 static struct BinopResult binop_result(Z3_context context,
-				       term_t term,
-				       struct List* list);
+				       struct List* list,
+				       term_t term);
 static struct AST term_to_ast(Z3_context context,
-			      term_t term,
-			      struct List* list);
+			      struct List* list,
+			      term_t term);
 static foreign_t z3_sat(term_t query);
 
 // For the moment, we only care about the theory of integers
@@ -191,59 +199,62 @@ static Z3_ast abs_wrapper(Z3_context context,
 		   around);
 }
 
-static void mk_unary(Z3_context context,
-		     term_t holds_param,
-		     Z3_ast (*f)(Z3_context, Z3_ast),
-		     struct AST* retval,
-		     struct List* list) {
+static struct AST mk_unary(Z3_context context,
+			   struct List* list,
+			   term_t holds_param,
+			   Z3_ast (*f)(Z3_context, Z3_ast)) {
+  struct AST retval;
   int ensure;
   term_t nested_term = PL_new_term_ref();
   ensure = PL_get_arg(1, holds_param, nested_term);
   assert(ensure);
-  struct AST nested = term_to_ast(context, nested_term, list);
+  struct AST nested = term_to_ast(context, list, nested_term);
   if (nested.which == AST_TYPE) {
-    set_ast((*f)(context, nested.value.ast), retval);
+    set_ast((*f)(context, nested.value.ast), &retval);
   } else {
-    retval->value.exception = nested.value.exception;
-    retval->which = EXCEPTION_TYPE;
+    retval.value.exception = nested.value.exception;
+    retval.which = EXCEPTION_TYPE;
   }
+  return retval;
 }
 
-static void mk_binop(Z3_context context,
-		     term_t holds_params,
-		     Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast),
-		     struct AST* retval,
-		     struct List* list) {
-  struct BinopResult binop = binop_result(context, holds_params, list);
-  binop_result_to_ast(context, binop, f, retval);
+static struct AST mk_binop(Z3_context context,
+			   struct List* list,
+			   term_t holds_params,
+			   Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast)) {
+  return binop_result_to_ast(context,
+			     binop_result(context, list, holds_params),
+			     f);
 }
 
-static void binop_result_to_ast(Z3_context context,
-				struct BinopResult result,
-				Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast),
-				struct AST* retval) {
+static struct AST binop_result_to_ast(Z3_context context,
+				      struct BinopResult result,
+				      Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast)) {
+  struct AST retval;
+
   if (result.which == AST_TYPE) {
-    set_ast((*f)(context, result.value.pair[0], result.value.pair[1]), retval);
+    set_ast((*f)(context, result.value.pair[0], result.value.pair[1]), &retval);
   } else {
-    retval->which = EXCEPTION_TYPE;
-    retval->value.exception = result.value.exception;
+    retval.which = EXCEPTION_TYPE;
+    retval.value.exception = result.value.exception;
   }
+  return retval;
 }
 
 static struct BinopResult binop_result(Z3_context context,
-				       term_t term,
-				       struct List* list) {
+				       struct List* list,
+				       term_t term) {
   struct BinopResult retval;
   int ensure;
   term_t left_term = PL_new_term_ref();
   ensure = PL_get_arg(1, term, left_term);
   assert(ensure);
-  struct AST left = term_to_ast(context, left_term, list);
+  struct AST left = term_to_ast(context, list, left_term);
   if (left.which == AST_TYPE) {
     term_t right_term = PL_new_term_ref();
     ensure = PL_get_arg(2, term, right_term);
     assert(ensure);
-    struct AST right = term_to_ast(context, right_term, list);
+    struct AST right = term_to_ast(context, list, right_term);
     if (right.which == AST_TYPE) {
       retval.value.pair[0] = left.value.ast;
       retval.value.pair[1] = right.value.ast;
@@ -278,9 +289,10 @@ static Z3_ast add_variable(Z3_context context,
   return ast;
 }
 
-static struct AST term_to_ast(Z3_context context,  // where to make terms
-			      term_t term,         // term to convert
-			      struct List* list) { // vars to terms
+static struct AST term_to_ast(Z3_context context,               // where to make terms
+			      struct List* list,                // vars to terms
+			      term_t term) {                      // term to convert
+			      //struct SolverType* solver_type) { // term type (output)
   struct AST retval;
   int temp_int;
   char* temp_string;
@@ -335,7 +347,7 @@ static struct AST term_to_ast(Z3_context context,  // where to make terms
       }
 
       if (!error_occurred) {
-	mk_unary(context, term, unary_op, &retval, list);
+	retval = mk_unary(context, list, term, unary_op);
       }
       break;
     case 2:
@@ -377,7 +389,7 @@ static struct AST term_to_ast(Z3_context context,  // where to make terms
       }
 
       if (!error_occurred) {
-	mk_binop(context, term, binary_op, &retval, list);
+	retval = mk_binop(context, list, term, binary_op);
       }
       break;
 
@@ -434,7 +446,7 @@ static foreign_t z3_sat(term_t query) {
   Z3_config config = Z3_mk_config();
   Z3_context context = Z3_mk_context(config);
   struct List* list = mk_empty_list();
-  struct AST ast = term_to_ast(context, query, list);
+  struct AST ast = term_to_ast(context, list, query);
 
   if (ast.which == AST_TYPE) {
     term_t except;
