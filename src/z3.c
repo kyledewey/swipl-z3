@@ -62,6 +62,8 @@ static void set_ast(Z3_ast ast, struct AST* retval);
 static void set_error(term_t term_with_error,
 		      char* message,
 		      struct AST* ast);
+static Z3_ast forward_unary(Z3_context context,
+			    Z3_ast to_forward);
 static Z3_ast and_wrapper(Z3_context context,
 			  Z3_ast left,
 			  Z3_ast right);
@@ -145,6 +147,11 @@ static void set_error(term_t term_with_error, char* message, struct AST* retval)
 			 PL_TERM, term_with_error);
   retval->value.exception = except;
   retval->which = EXCEPTION_TYPE;
+}
+
+static Z3_ast forward_unary(Z3_context context,
+			    Z3_ast to_forward) {
+  return to_forward;
 }
 
 static Z3_ast and_wrapper(Z3_context context,
@@ -580,6 +587,14 @@ static struct AST handle_unary_op(Z3_context context,
     my_type.id = BOOLEAN_TYPE;
     nested_type.id = BOOLEAN_TYPE;
     mk_op = &abs_wrapper;
+  } else if (strcmp(name, "int") == 0) {
+    my_type.id = INT_TYPE;
+    nested_type.id = INT_TYPE;
+    mk_op = &forward_unary;
+  } else if (strcmp(name, "bool") == 0) {
+    my_type.id = BOOLEAN_TYPE;
+    nested_type.id = BOOLEAN_TYPE;
+    mk_op = &forward_unary;
   } else {
     set_error(prolog_term, "unknown unary operation", &retval);
     error_occurred = 1;
