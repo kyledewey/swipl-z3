@@ -138,16 +138,22 @@ static void set_ast(Z3_ast ast, struct AST* retval) {
   retval->which = AST_TYPE;
 }
 
-static void set_error(term_t term_with_error, char* message, struct AST* retval) {
-  int ensure;
+static term_t make_type_error(char* message,
+			      term_t term_with_error) {
   term_t except = PL_new_term_ref();
-  ensure = PL_unify_term(except,
-			 PL_FUNCTOR_CHARS,
-			 "type_error",
-			 2,
-			 PL_CHARS, message,
-			 PL_TERM, term_with_error);
-  retval->value.exception = except;
+  int ensure = PL_unify_term(except,
+			     PL_FUNCTOR_CHARS,
+			     "type_error",
+			     2,
+			     PL_CHARS, message,
+			     PL_TERM, term_with_error);
+  assert(ensure);
+  return except;
+}
+
+static void set_error(term_t term_with_error, char* message, struct AST* retval) {
+  retval->value.exception = make_type_error(message,
+					    term_with_error);
   retval->which = EXCEPTION_TYPE;
 }
 
@@ -857,13 +863,46 @@ static void apply_model(Z3_context context,
     cur = cur->tail;
   } // while cur != NULL
 }
-    
+
+// returns non-zero if it's an atom, else 0
+// and sets the given exception
+static int ensure_atom(term_t should_be_atom,
+		       term_t* exception) {
+  if (!PL_is_atom(should_be_atom)) {
+    *exception = make_type_error("must be an atom",
+				 should_be_atom);
+    return 0;
+  }
+  return 1;
+}
+
+// Returns non-zero if they are ok.
+// Sets the given exception if they aren't
+static int params_ok(term_t query,
+		     term_t map_true_to,
+		     term_t map_false_to,
+		     foreign_t* exception) {
+  if (!ensure_atom(map_true_to, exception) ||
+      !ensure_atom(map_false_to, exception)) {
+    return 0;
+  }
+  return 1;
+}
+
 // Only externally exposed function
 static foreign_t z3_sat(term_t query,
 			term_t map_true_to,
 			term_t map_false_to) {
   int exception_occurred = 0;
   foreign_t exception;
+
+  if (!params_ok(query,
+		 map_true_to,
+		 map_false_to,
+		 &exception)) {
+    return PL_raise_exception(exception);
+  }
+
   foreign_t retval;
   Z3_config config = Z3_mk_config();
   Z3_context context = Z3_mk_context(config);
@@ -885,15 +924,7 @@ static foreign_t z3_sat(term_t query,
       retval = FALSE;
       break;
     case Z3_L_UNDEF:
-      except = PL_new_term_ref();
-      ensure = PL_unify_term(except,
-			     PL_FUNCTOR_CHARS,
-			     "type_error", // can probably do better
-			     2,
-			     PL_CHARS,
-			     "Z3 failed on input",
-			     query);
-      assert(ensure);
+      except = make_type_error("Z3 failed on input", query);
       exception_occurred = 1;
       break;
     case Z3_L_TRUE:
