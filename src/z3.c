@@ -112,7 +112,9 @@ static struct AST term_to_ast(Z3_context context,
 			      struct List* list,
 			      term_t term,
 			      struct SolverType* expected_type);
-static foreign_t z3_sat(term_t query);
+static foreign_t z3_sat(term_t query,
+			term_t map_true_to,
+			term_t map_false_to);
 
 // For the moment, we only care about the theory of integers
 
@@ -728,7 +730,7 @@ static struct AST handle_variable(Z3_context context,
       struct VarMapEntry entry;
       Z3_ast ast = Z3_mk_const(context,
 			       Z3_mk_string_symbol(context, name),
-			       Z3_mk_int_sort(context));
+			       sort);
       entry.name = name;
       entry.prolog_variable = prolog_variable;
       entry.z3_variable = ast;
@@ -795,9 +797,51 @@ static void free_list(struct List* list) {
   free(list);
 }
 
+static void apply_model_value(Z3_context context,
+			      struct VarMapEntry* variable,
+			      Z3_ast value_ast,
+			      term_t true_value,
+			      term_t false_value) {
+  int ensure;
+  Z3_bool_opt z3_ensure;
+  __int64 value_int;
+
+  switch (variable->solver_type.id) {
+  case BOOLEAN_TYPE:
+    switch (Z3_get_bool_value(context, value_ast)) {
+    case Z3_L_FALSE:
+      ensure = PL_unify(variable->prolog_variable, false_value);
+      assert(ensure);
+      break;
+    case Z3_L_UNDEF:
+      assert(0);
+      break;
+    case Z3_L_TRUE:
+      ensure = PL_unify(variable->prolog_variable, true_value);
+      assert(ensure);
+      break;
+    default:
+      assert(0);
+      break;
+    } // switch (bool value)
+    break;
+  case INT_TYPE:
+    z3_ensure = Z3_get_numeral_int64(context, value_ast, &value_int);
+    assert(z3_ensure == Z3_L_TRUE);
+    ensure = PL_unify_int64(variable->prolog_variable, value_int);
+    assert(ensure);
+    break;
+  default:
+    assert(0);
+    break;
+  } // switch (variable type)
+} // apply_model_value
+    
 static void apply_model(Z3_context context,
 			Z3_model model,
-			struct List* list) {
+			struct List* list,
+			term_t true_value,
+			term_t false_value) {
   struct Cons* cur = list->contents;
   while (cur != NULL) {
     Z3_ast value_ast;
@@ -808,16 +852,16 @@ static void apply_model(Z3_context context,
 				       Z3_L_TRUE,
 				       &value_ast);
     assert(ensure == Z3_L_TRUE);
-    ensure = Z3_get_numeral_int64(context, value_ast, &value_int);
-    assert(ensure == Z3_L_TRUE);
-    int ensure_pl = PL_unify_int64(cur->head.prolog_variable, value_int);
-    assert(ensure_pl);
+    apply_model_value(context, &(cur->head), value_ast,
+		      true_value, false_value);
     cur = cur->tail;
-  }
+  } // while cur != NULL
 }
     
 // Only externally exposed function
-static foreign_t z3_sat(term_t query) {
+static foreign_t z3_sat(term_t query,
+			term_t map_true_to,
+			term_t map_false_to) {
   int exception_occurred = 0;
   foreign_t exception;
   foreign_t retval;
@@ -831,6 +875,7 @@ static foreign_t z3_sat(term_t query) {
   if (ast.which == AST_TYPE) {
     term_t except;
     Z3_solver solver = Z3_mk_solver(context);
+    Z3_solver_inc_ref(context, solver);
     int ensure;
 
     Z3_solver_assert(context, solver, ast.value.ast);
@@ -854,7 +899,9 @@ static foreign_t z3_sat(term_t query) {
     case Z3_L_TRUE:
       apply_model(context,
 		  Z3_solver_get_model(context, solver),
-		  list);
+		  list,
+		  map_true_to,
+		  map_false_to);
       retval = TRUE;
       break;
     }
@@ -877,5 +924,5 @@ static foreign_t z3_sat(term_t query) {
 } // z3_sat
 
 install_t install_z3(void) {
-  PL_register_foreign("z3_sat", 1, z3_sat, 0);
+  PL_register_foreign("z3_sat", 3, z3_sat, 0);
 }
