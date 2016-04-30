@@ -53,7 +53,14 @@ struct List {
   unsigned int length;
 };
 
-static struct List* mk_empty_list(void);
+struct TranslationState {
+  Z3_context context;
+  struct List list;
+  term_t map_true_to;
+  term_t map_false_to;
+};
+
+static void mk_empty_list(struct List* list);
 static void prepend(struct VarMapEntry what,
 		    struct List* list);
 static void free_list(struct List* list);
@@ -84,32 +91,27 @@ static Z3_ast mul_wrapper(Z3_context context,
 			  Z3_ast right);
 static Z3_ast abs_wrapper(Z3_context context,
 			  Z3_ast around);
-static struct MultiResult multi_result(Z3_context context,
-				       struct List* list,
+static struct MultiResult multi_result(struct TranslationState* state,
 				       term_t term,
 				       struct SolverType** expected_types,
 				       unsigned int num_results);
 static void free_multi_result(struct MultiResult* result);
-static struct AST mk_unary(Z3_context context,
-			   struct List* list,
+static struct AST mk_unary(struct TranslationState* state,
 			   term_t holds_param,
 			   Z3_ast (*f)(Z3_context, Z3_ast),
 			   struct SolverType* expected_nested_type);
-static struct AST mk_binary(Z3_context context,
-			    struct List* list,
+static struct AST mk_binary(struct TranslationState* state,
 			    term_t holds_params,
 			    Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast),
 			    struct SolverType* expected_left_type,
 			    struct SolverType* expected_right_type);
-static struct AST mk_ternary(Z3_context context,
-			     struct List* list,
+static struct AST mk_ternary(struct TranslationState* state,
 			     term_t holds_params,
 			     Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast, Z3_ast),
 			     struct SolverType* first_type,
 			     struct SolverType* second_type,
 			     struct SolverType* third_type);
-static struct AST term_to_ast(Z3_context context,
-			      struct List* list,
+static struct AST term_to_ast(struct TranslationState* state,
 			      term_t term,
 			      struct SolverType* expected_type);
 static foreign_t z3_sat(term_t query,
@@ -118,11 +120,9 @@ static foreign_t z3_sat(term_t query,
 
 // For the moment, we only care about the theory of integers
 
-struct List* mk_empty_list(void) {
-  struct List* retval = malloc(sizeof(struct List));
-  retval->contents = NULL;
-  retval->length = 0;
-  return retval;
+static void mk_empty_list(struct List* list) {
+  list->contents = NULL;
+  list->length = 0;
 }
 
 void prepend(struct VarMapEntry what, struct List* list) {
@@ -227,21 +227,20 @@ static Z3_ast abs_wrapper(Z3_context context,
 		   around);
 }
 
-static struct AST mk_unary(Z3_context context,
-			   struct List* list,
+static struct AST mk_unary(struct TranslationState* state,
 			   term_t holds_param,
 			   Z3_ast (*f)(Z3_context, Z3_ast),
 			   struct SolverType* expected_nested_type) {
   struct SolverType* expected[1];
   expected[0] = expected_nested_type;
-  struct MultiResult result = multi_result(context, list,
+  struct MultiResult result = multi_result(state,
 					   holds_param,
 					   expected,
 					   1);
   struct AST retval;
 
   if (result.which == AST_TYPE) {
-    set_ast((*f)(context,
+    set_ast((*f)(state->context,
 		 result.value.results[0]),
 	    &retval);
   } else {
@@ -254,8 +253,7 @@ static struct AST mk_unary(Z3_context context,
   return retval;
 } // mk_unary
 
-static struct AST mk_binary(Z3_context context,
-			    struct List* list,
+static struct AST mk_binary(struct TranslationState* state,
 			    term_t holds_params,
 			    Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast),
 			    struct SolverType* expected_left_type,
@@ -263,14 +261,14 @@ static struct AST mk_binary(Z3_context context,
   struct SolverType* expected[2];
   expected[0] = expected_left_type;
   expected[1] = expected_right_type;
-  struct MultiResult result = multi_result(context, list,
+  struct MultiResult result = multi_result(state,
 					   holds_params,
 					   expected,
 					   2);
   struct AST retval;
 
   if (result.which == AST_TYPE) {
-    set_ast((*f)(context,
+    set_ast((*f)(state->context,
 		 result.value.results[0],
 		 result.value.results[1]),
 	    &retval);
@@ -284,8 +282,7 @@ static struct AST mk_binary(Z3_context context,
   return retval;
 } // mk_binary
 
-static struct AST mk_ternary(Z3_context context,
-			     struct List* list,
+static struct AST mk_ternary(struct TranslationState* state,
 			     term_t holds_params,
 			     Z3_ast (*f)(Z3_context, Z3_ast, Z3_ast, Z3_ast),
 			     struct SolverType* first_type,
@@ -295,14 +292,14 @@ static struct AST mk_ternary(Z3_context context,
   expected[0] = first_type;
   expected[1] = second_type;
   expected[2] = third_type;
-  struct MultiResult result = multi_result(context, list,
+  struct MultiResult result = multi_result(state,
 					   holds_params,
 					   expected,
 					   3);
   struct AST retval;
 
   if (result.which == AST_TYPE) {
-    set_ast((*f)(context,
+    set_ast((*f)(state->context,
 		 result.value.results[0],
 		 result.value.results[1],
 		 result.value.results[2]),
@@ -323,8 +320,7 @@ static void free_multi_result(struct MultiResult* result) {
   }
 }
 
-static struct MultiResult multi_result(Z3_context context,
-				       struct List* list,
+static struct MultiResult multi_result(struct TranslationState* state,
 				       term_t term,
 				       struct SolverType** expected_types,
 				       unsigned int num_results) {
@@ -340,8 +336,7 @@ static struct MultiResult multi_result(Z3_context context,
     term_t cur_term = PL_new_term_ref();
     int ensure = PL_get_arg(x + 1, term, cur_term);
     assert(ensure);
-    struct AST cur_ast = term_to_ast(context, list, cur_term,
-				     expected_types[x]);
+    struct AST cur_ast = term_to_ast(state, cur_term, expected_types[x]);
 
     // bail out on error
     if (cur_ast.which == EXCEPTION_TYPE) {
@@ -426,11 +421,10 @@ static int get_sort_for_type(Z3_context context,
   }
 }
 
-static struct AST handle_ternary_op(Z3_context context,
-				    struct List* list,
-				    struct SolverType* expected_type,
+static struct AST handle_ternary_op(struct TranslationState* state,
+				    term_t prolog_term,
 				    const char* name,
-				    term_t prolog_term) {
+				    struct SolverType* expected_type) {
   struct AST retval;
   struct SolverType my_type;
   my_type.id = UNINSTANTIATED_TYPE;
@@ -441,7 +435,7 @@ static struct AST handle_ternary_op(Z3_context context,
     struct SolverType guard_type;
     guard_type.id = BOOLEAN_TYPE;
     // my type = left child type = right child type
-    retval = mk_ternary(context, list, prolog_term,
+    retval = mk_ternary(state, prolog_term,
 			&Z3_mk_ite,
 			&guard_type,
 			expected_type,
@@ -453,11 +447,10 @@ static struct AST handle_ternary_op(Z3_context context,
   return retval;
 }
 
-static struct AST handle_binary_op(Z3_context context,
-				   struct List* list,
-				   struct SolverType* expected_type,
+static struct AST handle_binary_op(struct TranslationState* state,
+				   term_t prolog_term,
 				   const char* name,
-				   term_t prolog_term) {
+				   struct SolverType* expected_type) {
   struct AST retval;
   Z3_ast (*mk_op)(Z3_context, Z3_ast, Z3_ast);
   struct SolverType my_type;
@@ -564,7 +557,7 @@ static struct AST handle_binary_op(Z3_context context,
     if (!unify_types(expected_type, &my_type)) {
       set_smt_type_error(prolog_term, &retval);
     } else {
-      retval = mk_binary(context, list, prolog_term, mk_op,
+      retval = mk_binary(state, prolog_term, mk_op,
 			 left_type, right_type);
     }
   }
@@ -572,11 +565,10 @@ static struct AST handle_binary_op(Z3_context context,
   return retval;
 } // handle_binary_op
 
-static struct AST handle_unary_op(Z3_context context,
-				  struct List* list,
-				  struct SolverType* expected_type,
+static struct AST handle_unary_op(struct TranslationState* state,
+				  term_t prolog_term,
 				  const char* name,
-				  term_t prolog_term) {
+				  struct SolverType* expected_type) {
   struct AST retval;
   Z3_ast (*mk_op)(Z3_context, Z3_ast);
   struct SolverType my_type;
@@ -612,7 +604,7 @@ static struct AST handle_unary_op(Z3_context context,
     if (!unify_types(expected_type, &my_type)) {
       set_smt_type_error(prolog_term, &retval);
     } else {
-      retval = mk_unary(context, list, prolog_term, mk_op,
+      retval = mk_unary(state, prolog_term, mk_op,
 			&nested_type);
     }
   }
@@ -620,10 +612,9 @@ static struct AST handle_unary_op(Z3_context context,
   return retval;
 } // handle_unary_op
 
-static struct AST handle_compound_term(Z3_context context,
-				       struct List* list,
-				       struct SolverType* expected_type,
-				       term_t prolog_term) {
+static struct AST handle_compound_term(struct TranslationState* state,
+				       term_t prolog_term,
+				       struct SolverType* expected_type) {
   assert(PL_is_compound(prolog_term));
   atom_t atom_name;
   int arity;
@@ -640,16 +631,16 @@ static struct AST handle_compound_term(Z3_context context,
 
   switch (arity) {
   case 1:
-    retval = handle_unary_op(context, list, expected_type,
-			     name, prolog_term);
+    retval = handle_unary_op(state, prolog_term, name,
+			     expected_type);
     break;
   case 2:
-    retval = handle_binary_op(context, list, expected_type,
-			      name, prolog_term);
+    retval = handle_binary_op(state, prolog_term, name,
+			      expected_type);
     break;
   case 3:
-    retval = handle_ternary_op(context, list, expected_type,
-			       name, prolog_term);
+    retval = handle_ternary_op(state, prolog_term, name,
+			       expected_type);
     break;
   default:
     set_error(prolog_term, "unknown SMT operation", &retval);
@@ -659,9 +650,9 @@ static struct AST handle_compound_term(Z3_context context,
   return retval;
 } // handle_compound_term
 
-static struct AST handle_integer(Z3_context context,
-				 struct SolverType* expected_type,
-				 term_t prolog_integer) {
+static struct AST handle_integer(struct TranslationState* state,
+				 term_t prolog_integer,
+				 struct SolverType* expected_type) {
   assert(PL_is_integer(prolog_integer));
 
   struct AST retval;
@@ -673,16 +664,16 @@ static struct AST handle_integer(Z3_context context,
   unify_types_set_ast(expected_type,
 		      &inferred_type,
 		      prolog_integer,
-		      Z3_mk_int(context,
+		      Z3_mk_int(state->context,
 				temp_int,
-				Z3_mk_int_sort(context)),
+				Z3_mk_int_sort(state->context)),
 		      &retval);
   return retval;
 }
 
-static struct AST handle_atom(Z3_context context,
-			      struct SolverType* expected_type,
-			      term_t prolog_atom) {
+static struct AST handle_atom(struct TranslationState* state,
+			      term_t prolog_atom,
+			      struct SolverType* expected_type) {
   assert(PL_is_atom(prolog_atom));
 
   struct AST retval;
@@ -694,12 +685,12 @@ static struct AST handle_atom(Z3_context context,
   if (strcmp(temp_string, "true") == 0) {
     inferred_type.id = BOOLEAN_TYPE;
     unify_types_set_ast(expected_type, &inferred_type,
-			prolog_atom, Z3_mk_true(context),
+			prolog_atom, Z3_mk_true(state->context),
 			&retval);
   } else if (strcmp(temp_string, "false") == 0) {
     inferred_type.id = BOOLEAN_TYPE;
     unify_types_set_ast(expected_type, &inferred_type,
-			prolog_atom, Z3_mk_false(context),
+			prolog_atom, Z3_mk_false(state->context),
 			&retval);
   } else {
     set_error(prolog_atom, "unknown constant", &retval);
@@ -709,10 +700,9 @@ static struct AST handle_atom(Z3_context context,
 }
     
 // returns the Z3 representation of the variable, or a type error
-static struct AST handle_variable(Z3_context context,
-				  struct List* list,
-				  struct SolverType* expected_type,
-				  term_t prolog_variable) {
+static struct AST handle_variable(struct TranslationState* state,
+				  term_t prolog_variable,
+				  struct SolverType* expected_type) {
   assert(PL_is_variable(prolog_variable));
   char* name;
   int ensure = PL_get_chars(prolog_variable, &name, CVT_VARIABLE);
@@ -720,7 +710,7 @@ static struct AST handle_variable(Z3_context context,
 
   // See if the variable already exists.  If so, try to use that.
   struct AST retval;
-  struct VarMapEntry* existing_variable = get_variable(list, name);
+  struct VarMapEntry* existing_variable = get_variable(&(state->list), name);
 
   if (existing_variable != NULL) {
     // We already have variable.  Make sure the types work
@@ -732,16 +722,16 @@ static struct AST handle_variable(Z3_context context,
   } else {
     // introduce a new variable
     Z3_sort sort;
-    if (get_sort_for_type(context, expected_type, &sort)) {
+    if (get_sort_for_type(state->context, expected_type, &sort)) {
       struct VarMapEntry entry;
-      Z3_ast ast = Z3_mk_const(context,
-			       Z3_mk_string_symbol(context, name),
+      Z3_ast ast = Z3_mk_const(state->context,
+			       Z3_mk_string_symbol(state->context, name),
 			       sort);
       entry.name = name;
       entry.prolog_variable = prolog_variable;
       entry.z3_variable = ast;
       entry.solver_type = *expected_type;
-      prepend(entry, list);
+      prepend(entry, &(state->list));
       set_ast(ast, &retval);
     } else {
       set_error(prolog_variable, "Unknown SMT variable type", &retval);
@@ -751,10 +741,9 @@ static struct AST handle_variable(Z3_context context,
   return retval;
 }
 
-static struct AST term_to_ast(Z3_context context,                 // where to make terms
-			      struct List* list,                  // vars to terms
-			      term_t term,                        // term to convert
-			      struct SolverType* expected_type) { // term type
+static struct AST term_to_ast(struct TranslationState* state,
+			      term_t term,
+			      struct SolverType* expected_type) {
   struct AST retval;
   atom_t atom_name;
   int arity;
@@ -770,20 +759,19 @@ static struct AST term_to_ast(Z3_context context,                 // where to ma
 
   switch (PL_term_type(term)) {
   case PL_VARIABLE:
-    retval = handle_variable(context, list, expected_type, term);
+    retval = handle_variable(state, term, expected_type);
     break;
 
   case PL_ATOM:
-    retval = handle_atom(context, expected_type, term);
+    retval = handle_atom(state, term, expected_type);
     break;
 
   case PL_INTEGER:
-    retval = handle_integer(context, expected_type, term);
+    retval = handle_integer(state, term, expected_type);
     break;
 
   case PL_TERM:
-    retval = handle_compound_term(context, list, expected_type,
-				  term);
+    retval = handle_compound_term(state, term, expected_type);
     break;
   default:
     set_error(term, "bad Prolog value", &retval);
@@ -800,30 +788,29 @@ static void free_list(struct List* list) {
     free(cur);
     cur = next;
   }
-  free(list);
 }
 
-static void apply_model_value(Z3_context context,
+static void apply_model_value(struct TranslationState* state,
 			      struct VarMapEntry* variable,
-			      Z3_ast value_ast,
-			      term_t true_value,
-			      term_t false_value) {
+			      Z3_ast value_ast) {
   int ensure;
   Z3_bool_opt z3_ensure;
   __int64 value_int;
 
   switch (variable->solver_type.id) {
   case BOOLEAN_TYPE:
-    switch (Z3_get_bool_value(context, value_ast)) {
+    switch (Z3_get_bool_value(state->context, value_ast)) {
     case Z3_L_FALSE:
-      ensure = PL_unify(variable->prolog_variable, false_value);
+      ensure = PL_unify(variable->prolog_variable,
+			state->map_false_to);
       assert(ensure);
       break;
     case Z3_L_UNDEF:
       assert(0);
       break;
     case Z3_L_TRUE:
-      ensure = PL_unify(variable->prolog_variable, true_value);
+      ensure = PL_unify(variable->prolog_variable,
+			state->map_true_to);
       assert(ensure);
       break;
     default:
@@ -832,9 +819,12 @@ static void apply_model_value(Z3_context context,
     } // switch (bool value)
     break;
   case INT_TYPE:
-    z3_ensure = Z3_get_numeral_int64(context, value_ast, &value_int);
+    z3_ensure = Z3_get_numeral_int64(state->context,
+				     value_ast,
+				     &value_int);
     assert(z3_ensure == Z3_L_TRUE);
-    ensure = PL_unify_int64(variable->prolog_variable, value_int);
+    ensure = PL_unify_int64(variable->prolog_variable,
+			    value_int);
     assert(ensure);
     break;
   default:
@@ -843,23 +833,19 @@ static void apply_model_value(Z3_context context,
   } // switch (variable type)
 } // apply_model_value
     
-static void apply_model(Z3_context context,
-			Z3_model model,
-			struct List* list,
-			term_t true_value,
-			term_t false_value) {
-  struct Cons* cur = list->contents;
+static void apply_model(struct TranslationState* state,
+			Z3_model model) {
+  struct Cons* cur = state->list.contents;
   while (cur != NULL) {
     Z3_ast value_ast;
     __int64 value_int;
-    Z3_bool_opt ensure = Z3_model_eval(context,
+    Z3_bool_opt ensure = Z3_model_eval(state->context,
 				       model,
 				       cur->head.z3_variable,
 				       Z3_L_TRUE,
 				       &value_ast);
     assert(ensure == Z3_L_TRUE);
-    apply_model_value(context, &(cur->head), value_ast,
-		      true_value, false_value);
+    apply_model_value(state, &(cur->head), value_ast);
     cur = cur->tail;
   } // while cur != NULL
 }
@@ -904,22 +890,31 @@ static foreign_t z3_sat(term_t query,
   }
 
   foreign_t retval;
+
+  struct TranslationState translation_state;
   Z3_config config = Z3_mk_config();
-  Z3_context context = Z3_mk_context(config);
-  struct List* list = mk_empty_list();
+  translation_state.context = Z3_mk_context(config);
+  mk_empty_list(&(translation_state.list));
+  translation_state.map_true_to = map_true_to;
+  translation_state.map_false_to = map_false_to;
+
   struct SolverType expected_type;
   expected_type.id = BOOLEAN_TYPE;
-  struct AST ast = term_to_ast(context, list, query, &expected_type);
+  struct AST ast = term_to_ast(&translation_state,
+			       query,
+			       &expected_type);
 
   if (ast.which == AST_TYPE) {
     term_t except;
-    Z3_solver solver = Z3_mk_solver(context);
-    Z3_solver_inc_ref(context, solver);
+    Z3_solver solver = Z3_mk_solver(translation_state.context);
+    Z3_solver_inc_ref(translation_state.context, solver);
     int ensure;
 
-    Z3_solver_assert(context, solver, ast.value.ast);
+    Z3_solver_assert(translation_state.context,
+		     solver,
+		     ast.value.ast);
 
-    switch (Z3_solver_check(context, solver)) {
+    switch (Z3_solver_check(translation_state.context, solver)) {
     case Z3_L_FALSE:
       retval = FALSE;
       break;
@@ -928,22 +923,20 @@ static foreign_t z3_sat(term_t query,
       exception_occurred = 1;
       break;
     case Z3_L_TRUE:
-      apply_model(context,
-		  Z3_solver_get_model(context, solver),
-		  list,
-		  map_true_to,
-		  map_false_to);
+      apply_model(&translation_state,
+		  Z3_solver_get_model(translation_state.context,
+				      solver));
       retval = TRUE;
       break;
     }
-    Z3_solver_dec_ref(context, solver);
+    Z3_solver_dec_ref(translation_state.context, solver);
   } else {
     exception_occurred = 1;
     exception = ast.value.exception;
   }
 
-  free_list(list);
-  Z3_del_context(context);
+  free_list(&(translation_state.list));
+  Z3_del_context(translation_state.context);
   Z3_del_config(config);
 
   if (exception_occurred) {
