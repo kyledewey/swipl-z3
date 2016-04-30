@@ -721,7 +721,9 @@ static struct AST handle_variable(struct TranslationState* state,
 				  struct SolverType* expected_type) {
   assert(PL_is_variable(prolog_variable));
   char* name;
-  int ensure = PL_get_chars(prolog_variable, &name, CVT_VARIABLE);
+  int ensure = PL_get_chars(prolog_variable,
+			    &name,
+			    CVT_VARIABLE | BUF_MALLOC);
   assert(ensure);
 
   // See if the variable already exists.  If so, try to use that.
@@ -729,6 +731,7 @@ static struct AST handle_variable(struct TranslationState* state,
   struct VarMapEntry* existing_variable = get_variable(&(state->list), name);
 
   if (existing_variable != NULL) {
+    PL_free(name);
     // We already have variable.  Make sure the types work
     unify_types_set_ast(expected_type,
 			&(existing_variable->solver_type),
@@ -800,6 +803,7 @@ static struct AST term_to_ast(struct TranslationState* state,
 static void free_list(struct List* list) {
   struct Cons* cur = list->contents;
   while (cur != NULL) {
+    PL_free(cur->head.name);
     struct Cons* next = cur->tail;
     free(cur);
     cur = next;
