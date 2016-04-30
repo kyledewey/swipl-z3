@@ -4,6 +4,8 @@
 #include <assert.h>
 #include <stdio.h>
 
+#define DEBUG 0
+
 enum ASTType {
   AST_TYPE,
   EXCEPTION_TYPE
@@ -116,6 +118,9 @@ static struct AST mk_ternary(struct TranslationState* state,
 static struct AST term_to_ast(struct TranslationState* state,
 			      term_t term,
 			      struct SolverType* expected_type);
+static void debug_print_ast(struct TranslationState* state,
+			    char* prefix,
+			    Z3_ast ast);
 static foreign_t z3_sat(term_t query,
 			term_t map_true_to,
 			term_t map_false_to);
@@ -245,6 +250,7 @@ static struct AST mk_unary(struct TranslationState* state,
     set_ast((*f)(state->context,
 		 result.value.results[0]),
 	    &retval);
+    debug_print_ast(state, "UNOP", retval.value.ast);
   } else {
     retval.which = EXCEPTION_TYPE;
     retval.value.exception = result.value.exception;
@@ -274,6 +280,7 @@ static struct AST mk_binary(struct TranslationState* state,
 		 result.value.results[0],
 		 result.value.results[1]),
 	    &retval);
+    debug_print_ast(state, "BINOP", retval.value.ast);
   } else {
     retval.which = EXCEPTION_TYPE;
     retval.value.exception = result.value.exception;
@@ -349,6 +356,7 @@ static struct MultiResult multi_result(struct TranslationState* state,
     }
 
     assert(cur_ast.which == AST_TYPE);
+    debug_print_ast(state, "MULTI RESULT", cur_ast.value.ast);
     retval.value.results[x] = cur_ast.value.ast;
   }
 
@@ -588,7 +596,7 @@ static struct AST handle_unary_op(struct TranslationState* state,
   } else if (strcmp(name, "not") == 0) {
     my_type.id = BOOLEAN_TYPE;
     nested_type.id = BOOLEAN_TYPE;
-    mk_op = &abs_wrapper;
+    mk_op = &Z3_mk_not;
   } else if (strcmp(name, "int") == 0) {
     my_type.id = INT_TYPE;
     nested_type.id = INT_TYPE;
@@ -883,6 +891,15 @@ static int params_ok(term_t query,
   return 1;
 }
 
+static void debug_print_ast(struct TranslationState* state,
+			    char* prefix,
+			    Z3_ast ast) {
+  if (DEBUG) {
+    Z3_string string = Z3_ast_to_string(state->context, ast);
+    printf("Z3 AST: %s %s\n", prefix, string);
+  }
+}
+
 // Only externally exposed function
 static foreign_t z3_sat(term_t query,
 			term_t map_true_to,
@@ -913,8 +930,8 @@ static foreign_t z3_sat(term_t query,
   struct AST ast = term_to_ast(&translation_state,
 			       query,
 			       &expected_type);
-
   if (ast.which == AST_TYPE) {
+    debug_print_ast(&translation_state, "FINAL", ast.value.ast);
     term_t except;
     Z3_solver solver = Z3_mk_solver(translation_state.context);
     Z3_solver_inc_ref(translation_state.context, solver);
