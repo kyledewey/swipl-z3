@@ -57,7 +57,9 @@ struct TranslationState {
   Z3_context context;
   struct List list;
   term_t map_true_to;
+  char* true_name;
   term_t map_false_to;
+  char* false_name;
 };
 
 static void mk_empty_list(struct List* list);
@@ -671,23 +673,29 @@ static struct AST handle_integer(struct TranslationState* state,
   return retval;
 }
 
+static char* get_atom_name(term_t prolog_atom) {
+  assert(PL_is_atom(prolog_atom));
+  char* retval;
+  int ensure = PL_get_atom_chars(prolog_atom, &retval);
+  assert(ensure);
+  return retval;
+}
+
 static struct AST handle_atom(struct TranslationState* state,
 			      term_t prolog_atom,
 			      struct SolverType* expected_type) {
   assert(PL_is_atom(prolog_atom));
 
   struct AST retval;
-  Z3_ast z3_ast;
   struct SolverType inferred_type;
-  char* temp_string;
-  int ensure = PL_get_atom_chars(prolog_atom, &temp_string);
-  assert(ensure);
-  if (strcmp(temp_string, "true") == 0) {
+  char* my_name = get_atom_name(prolog_atom);
+
+  if (strcmp(my_name, state->true_name) == 0) {
     inferred_type.id = BOOLEAN_TYPE;
     unify_types_set_ast(expected_type, &inferred_type,
 			prolog_atom, Z3_mk_true(state->context),
 			&retval);
-  } else if (strcmp(temp_string, "false") == 0) {
+  } else if (strcmp(my_name, state->false_name) == 0) {
     inferred_type.id = BOOLEAN_TYPE;
     unify_types_set_ast(expected_type, &inferred_type,
 			prolog_atom, Z3_mk_false(state->context),
@@ -896,7 +904,9 @@ static foreign_t z3_sat(term_t query,
   translation_state.context = Z3_mk_context(config);
   mk_empty_list(&(translation_state.list));
   translation_state.map_true_to = map_true_to;
+  translation_state.true_name = get_atom_name(map_true_to);
   translation_state.map_false_to = map_false_to;
+  translation_state.false_name = get_atom_name(map_false_to);
 
   struct SolverType expected_type;
   expected_type.id = BOOLEAN_TYPE;
