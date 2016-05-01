@@ -4,3 +4,6 @@
 
 # build directory
 build
+
+# results from running Z3 (unsure why?)
+.z3-trace
