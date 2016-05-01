@@ -4,4 +4,4 @@ build/z3.so: src/z3.c
 	swipl-ld -shared -I/home/kyle/stock_z3/with_debug_trace/z3/src/api -L/home/kyle/stock_z3/with_debug_trace/z3/build -o build/z3 -lz3 build/z3.o
 
 run: build/z3.so
-	swipl -g "load_foreign_library(foreign('/home/kyle/swipl-z3/build/z3.so'))."
+	LD_LIBRARY_PATH=/home/kyle/stock_z3/with_debug_trace/z3/build swipl -g "load_foreign_library(foreign('/home/kyle/swipl-z3/build/z3.so'))."
